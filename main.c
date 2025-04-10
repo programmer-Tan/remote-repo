@@ -12,241 +12,236 @@
 #include <time.h>
 #include "graphics.h"
 
-extern void *tlsf_create_with_pool(void* mem, size_t bytes);
-extern void *g_heap;
+// Global variable for heap management
+void *g_heap;
 
-// 全局变量
-int a[200] = {0}; // 冒泡排序的数组
-int b[200] = {0}; // 插入排序的数组
-int c[200] = {0}; // 快速排序的数组
-int k,i,j;
-int bubble_frames[200 * 200] = {0}; // 冒泡排序的每一帧
-int insert_frames[200 * 200] = {0}; // 插入排序的每一帧
-int quick_frames[200 * 200] = {0}; // 快速排序的每一帧
-volatile int bubble_done = 0; // 冒泡排序完成标志
-volatile int insert_done = 0; // 插入排序完成标志
-volatile int quick_done = 0; // 快速排序完成标志
+#define SYSCALL_setpriority 11
+#define SYSCALL_getpriority 12
+#define PRI_USER_MIN    0
+#define PRI_USER_MAX  127
+#define MAX_TASKS 128 
 
-/**
- * GCC insists on __main
- *    http://gcc.gnu.org/onlinedocs/gccint/Collect2.html
- */
-void __main()
-{
-    size_t heap_size = 32 * 1024 * 1024; // 32MB 堆大小
-    void *heap_base = mmap(NULL, heap_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (heap_base == MAP_FAILED) {
-        printf("Failed to allocate heap memory!\n");
-        return;
-    }
+// 共享数据结构
+typedef struct {
+    int array[200];
+    int frames[200 * 200];
+    volatile int current_frame;
+    volatile int done;
+    int tid;
+    int color;
+    int x_offset;
+} SortThread;
 
-    // 初始化 TLSF 内存池
-    g_heap = tlsf_create_with_pool(heap_base, heap_size);
-    if (g_heap == NULL) {
-        printf("Failed to create TLSF memory pool!\n");
-        return;
-    }
+SortThread thread_A, thread_B;
+volatile int running = 1;
+int emp2 = 10;
+int i,j,k;
 
-    printf("TLSF memory pool initialized successfully!\n");
+// 优先级条位置参数
+#define PRIORITY_BAR_Y (g_graphic_dev.YResolution - 100)  // 将优先级条下移
+#define PRIORITY_BAR_HEIGHT 30
+
+// 优先级管理
+int thread_priorities[MAX_TASKS] = {0};
+
+int setpriority(int tid, int prio) {
+    if (tid < 0 || tid >= MAX_TASKS) return -1;
+    if (prio < PRI_USER_MIN || prio > PRI_USER_MAX) return -1;
+    thread_priorities[tid] = prio;
+    return 0;
 }
 
-// 冒泡排序
-void tsk_bubble_sort(void *pv)
-{
-    printf("This is bubble sort task with tid=%d\r\n", task_getid());
+int getpriority(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS) return -1;
+    return thread_priorities[tid];
+}
 
-    // 冒泡排序
-    for (i = 0; i < 200; i++) {
+void msleep(int milliseconds) {
+    struct timespec ts = {
+        .tv_sec = milliseconds / 1000,
+        .tv_nsec = (milliseconds % 1000) * 1000000
+    };
+    nanosleep(&ts, NULL);
+}
+
+// 冒泡排序线程
+void tsk_bubble_sort(void *pv) {
+    SortThread *thread = (SortThread *)pv;
+    thread->tid = task_getid();
+    setpriority(thread->tid, 5); // 默认优先级
+    
+    for (i = 0; i < 200 && running; i++) {
         for (j = 0; j < 200 - i - 1; j++) {
-            if (a[j] > a[j + 1]) {
-                // 交换 a[j] 和 a[j + 1]
-                int temp = a[j];
-                a[j] = a[j + 1];
-                a[j + 1] = temp;
+            if (thread->array[j] > thread->array[j + 1]) {
+                int temp = thread->array[j];
+                thread->array[j] = thread->array[j + 1];
+                thread->array[j + 1] = temp;
             }
         }
-
-        // 每一轮排序后，将当前 a 数组的状态复制到 bubble_frames 数组中
+        
+        // 保存当前帧
         for (k = 0; k < 200; k++) {
-            bubble_frames[i * 200 + k] = a[k];
+            thread->frames[i * 200 + k] = thread->array[k];
         }
+        thread->current_frame = i;
+        
+        // 动态速度控制
+        msleep(100 - getpriority(thread->tid));
     }
-
-    bubble_done = 1; // 任务完成，设置标志
-    task_exit(0); // 不能直接 return，必须调用 task_exit
+    thread->done = 1;
+    task_exit(0);
 }
 
-// 插入排序
-void tsk_insert_sort(void *pv)
-{
-    printf("This is insert sort task with tid=%d\r\n", task_getid());
-    int key;
-    // 插入排序
-    for (i = 1; i < 200; i++) {
-        key = b[i];
-        j = i - 1;
-
-        while (j >= 0 && b[j] > key) {
-            b[j + 1] = b[j];
-            j = j - 1;
-        }
-        b[j + 1] = key;
-
-        // 每一轮排序后，将当前 b 数组的状态复制到 insert_frames 数组中
-        for (k = 0; k < 200; k++) {
-            insert_frames[(i - 1) * 200 + k] = b[k];
-        }
+// 绘制优先级条
+void draw_priority_bars(int prio_A, int prio_B) {
+    // 用黑色矩形覆盖整个区域来"清除"
+    int y;
+    for(y = PRIORITY_BAR_Y - PRIORITY_BAR_HEIGHT/2; 
+    y <= PRIORITY_BAR_Y + PRIORITY_BAR_HEIGHT/2; 
+    y++) {
+    line(g_graphic_dev.XResolution/2 - PRI_USER_MAX*emp2 - 2, y,
+        g_graphic_dev.XResolution/2 + PRI_USER_MAX*emp2 + 2, y,
+        RGB(0,0,0));
     }
-    // 保存最后一帧
-    for (k = 0; k < 200; k++) {
-        insert_frames[(200 - 1) * 200 + k] = b[k];
+    
+    // 绘制新的优先级条（修改颜色）
+    for(i = 0; i <= prio_A; i++) {
+        line(g_graphic_dev.XResolution/2 - i*emp2 - 1, 
+             PRIORITY_BAR_Y - PRIORITY_BAR_HEIGHT/2,
+             g_graphic_dev.XResolution/2 - i*emp2 - 1,
+             PRIORITY_BAR_Y + PRIORITY_BAR_HEIGHT/2, 
+             RGB(255,165,0)); // 橙色表示线程A
     }
-    insert_done = 1; // 任务完成，设置标志
-    task_exit(0); // 不能直接 return，必须调用 task_exit
+    for(i = 0; i <= prio_B; i++) {
+        line(g_graphic_dev.XResolution/2 + i*emp2 + 1,
+             PRIORITY_BAR_Y - PRIORITY_BAR_HEIGHT/2,
+             g_graphic_dev.XResolution/2 + i*emp2 + 1,
+             PRIORITY_BAR_Y + PRIORITY_BAR_HEIGHT/2,
+             RGB(0,255,0)); // 绿色表示线程B
+    }
+    
 }
 
-// 快速排序
-void tsk_quick_sort(void *pv)
-{
-    printf("This is quick sort task with tid=%d\r\n", task_getid());
+// 控制线程
+void tsk_control(void *pv) {
+    int prio_A = 5, prio_B = 5;
+    draw_priority_bars(prio_A, prio_B);
+    
+    while(running) {
+        int key = getchar();
+        
+        if(key == 0x4800 && prio_A < PRI_USER_MAX) { // 上箭头
+            prio_A++;
+            setpriority(thread_A.tid, prio_A);
+        }
+        else if(key == 0x5000 && prio_A > PRI_USER_MIN) { // 下箭头
+            prio_A--;
+            setpriority(thread_A.tid, prio_A);
+        }
+        else if(key == 0x4d00 && prio_B < PRI_USER_MAX) { // 右箭头
+            prio_B++;
+            setpriority(thread_B.tid, prio_B);
+        }
+        else if(key == 0x4b00 && prio_B > PRI_USER_MIN) { // 左箭头
+            prio_B--;
+            setpriority(thread_B.tid, prio_B);
+        }
+        else if(key == 'q') {
+            running = 0;
+        }
+        
+        draw_priority_bars(prio_A, prio_B);
+    }
+    task_exit(0);
+}
 
-    // 快速排序递归函数
-    void quick_sort(int arr[], int low, int high, int *frame_index) {
-        if (low < high) {
-            int pivot = arr[high]; // 选择最后一个元素作为基准
-            int i = low - 1;
-
-            for (j = low; j < high; j++) {
-                if (arr[j] < pivot) {
-                    i++;
-                    int temp = arr[i];
-                    arr[i] = arr[j];
-                    arr[j] = temp;
+// 主绘制函数
+void draw_both_sorts() {
+    int last_frame_A = -1, last_frame_B = -1;
+    
+    while ((!thread_A.done || !thread_B.done) && running) {
+        // 绘制线程A
+        if (thread_A.current_frame != last_frame_A) {
+            // 清除A的上一帧
+            if (last_frame_A >= 0) {
+                for (j = 0; j < 200; j++) {
+                    line(thread_A.x_offset, 50 + j*2,
+                         thread_A.x_offset + thread_A.frames[last_frame_A*200 + j],
+                         50 + j*2, RGB(0,0,0));
                 }
             }
-
-            int temp = arr[i + 1];
-            arr[i + 1] = arr[high];
-            arr[high] = temp;
-
-            // 每一轮排序后，将当前 c 数组的状态复制到 quick_frames 数组中
-            for (k = 0; k < 200; k++) {
-                quick_frames[(*frame_index) * 200 + k] = c[k];
+            // 绘制A的当前帧
+            for (j = 0; j < 200; j++) {
+                line(thread_A.x_offset, 50 + j*2,
+                     thread_A.x_offset + thread_A.frames[thread_A.current_frame*200 + j],
+                     50 + j*2, thread_A.color);
             }
-            (*frame_index)++;
-
-            quick_sort(arr, low, i, frame_index); // 递归排序左半部分
-            quick_sort(arr, i + 2, high, frame_index); // 递归排序右半部分
+            last_frame_A = thread_A.current_frame;
         }
-    }
-
-    int frame_index = 0;
-    quick_sort(c, 0, 199, &frame_index); // 调用快速排序
-
-    // 保存最后一帧
-    for (k = 0; k < 200; k++) {
-        quick_frames[(frame_index - 1) * 200 + k] = c[k];
-    }
-
-    quick_done = 1; // 任务完成，设置标志
-    task_exit(0); // 不能直接 return，必须调用 task_exit
-}
-
-/**
- * 绘制帧函数
- * 参数说明：
- *   data: 存储每一帧数据的数组
- *   frame_count: 总帧数
- *   lines_per_frame: 每帧绘制的行数
- *   line_spacing: 行间距
- *   start_x: 绘制的起始 X 坐标
- *   start_y: 绘制的起始 Y 坐标
- *   delay_ms: 每帧之间的延迟时间（毫秒）
- *   color: 线条颜色
- */
-void draw_frames(int *data, int frame_count, int lines_per_frame, 
-    int line_spacing, int start_x, int start_y, int delay_ms, int color)
-{
-    struct timespec sleep_time = {
-       .tv_sec = 0,
-       .tv_nsec = delay_ms * 1000000 // 使用 delay_ms 参数
-    };
-
-    int j, i;
-    for (j = 0; j < frame_count; j++) {
-        for (i = 0; i < lines_per_frame; i++) {
-            // 缩短线条长度，避免重叠
-            line(start_x, start_y + line_spacing * i, start_x +
-                 data[i + j * lines_per_frame] * (line_spacing / 2), start_y + line_spacing * i, color);
-        }
-
-        nanosleep(&sleep_time, NULL);
-
-        // 如果不是最后一帧，清除当前帧
-        if (j < frame_count - 1) {
-            for (i = 0; i < lines_per_frame; i++) {
-                line(start_x, start_y + line_spacing * i, start_x + 
-                    data[i + j * lines_per_frame] * (line_spacing / 2), start_y + line_spacing * i, RGB(0, 0, 0));
+        
+        // 绘制线程B
+        if (thread_B.current_frame != last_frame_B) {
+            // 清除B的上一帧
+            if (last_frame_B >= 0) {
+                for (j = 0; j < 200; j++) {
+                    line(thread_B.x_offset, 50 + j*2,
+                         thread_B.x_offset + thread_B.frames[last_frame_B*200 + j],
+                         50 + j*2, RGB(0,0,0));
+                }
             }
+            // 绘制B的当前帧
+            for (j = 0; j < 200; j++) {
+                line(thread_B.x_offset, 50 + j*2,
+                     thread_B.x_offset + thread_B.frames[thread_B.current_frame*200 + j],
+                     50 + j*2, thread_B.color);
+            }
+            last_frame_B = thread_B.current_frame;
         }
+        
+        msleep(16); // ~60fps
     }
 }
 
-/**
- * 第一个运行在用户模式的线程所执行的函数
- */
-void main(void *pv)
-{
-    printf("task #%d: I'm the first user task(pv=0x%08x)!\r\n",
-           task_getid(), pv);
+void __main() {
+    size_t heap_size = 32*1024*1024;
+    void *heap_base = mmap(NULL, heap_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
+    g_heap = tlsf_create_with_pool(heap_base, heap_size);
+}
 
-    // 初始化随机数种子
+void main(void *pv) {
+    // 初始化数据结构
+    thread_A.color = RGB(255,0,0);  // 排序过程仍用红色
+    thread_A.x_offset = 100;
+    thread_B.color = RGB(0,0,255);  // 排序过程仍用蓝色
+    thread_B.x_offset = 400;
+    
+    // 初始化随机数组
     srand(time(NULL));
-
-    // 生成随机数组
     for (i = 0; i < 200; i++) {
-        a[i] = (rand() % 1000) / 5; // 生成 0 到 200 之间的随机数
-        b[i] = a[i]; // 复制到插入排序的数组
-        c[i] = a[i]; // 复制到快速排序的数组
+        thread_A.array[i] = rand() % 200;
+        thread_B.array[i] = rand() % 200;
     }
-
-    // 申请用户栈
-    unsigned char *stack_bubble = (unsigned char *)malloc(1024 * 1024);
-    unsigned char *stack_insert = (unsigned char *)malloc(1024 * 1024);
-    unsigned char *stack_quick = (unsigned char *)malloc(1024 * 1024);
-
-    if (stack_bubble == NULL || stack_insert == NULL || stack_quick == NULL) {
-        printf("Failed to allocate stack memory!\n");
-        return;
-    }
-
-    // 创建排序任务
-    int tid_bubble, tid_insert, tid_quick;
-    tid_bubble = task_create(stack_bubble + 1024 * 1024, &tsk_bubble_sort, (void *)0);
-    tid_insert = task_create(stack_insert + 1024 * 1024, &tsk_insert_sort, (void *)0);
-    tid_quick = task_create(stack_quick + 1024 * 1024, &tsk_quick_sort, (void *)0);
-
-    printf("Bubble sort task created with tid=%d\n", tid_bubble);
-    printf("Insert sort task created with tid=%d\n", tid_insert);
-    printf("Quick sort task created with tid=%d\n", tid_quick);
-
-    // 忙等待，直到所有任务完成
-    while (!bubble_done || !insert_done || !quick_done);
-
-    // 初始化图形模式
+    
+    // 初始化图形
     init_graphic(0x143);
-
-    // 绘制排序过程
-    draw_frames(bubble_frames, 200, 200, 3, 0, 0, 50, RGB(255, 0, 0)); // 冒泡排序，红色
-    draw_frames(insert_frames, 200, 200, 3, 250, 0, 50, RGB(0, 255, 0)); // 插入排序，绿色
-    draw_frames(quick_frames, 200, 200, 3, 500, 0, 50, RGB(0, 0, 255)); // 快速排序，蓝色
-
-    // 释放用户栈
-    free(stack_bubble);
-    free(stack_insert);
-    free(stack_quick);
-
-    // 主线程进入无限循环
-    while (1);
+    
+    // 分配栈空间
+    unsigned char *stack_A = malloc(1024*1024);
+    unsigned char *stack_B = malloc(1024*1024);
+    unsigned char *stack_ctrl = malloc(1024*1024);
+    
+    // 创建线程
+    task_create(stack_A + 1024*1024, &tsk_bubble_sort, &thread_A);
+    task_create(stack_B + 1024*1024, &tsk_bubble_sort, &thread_B);
+    task_create(stack_ctrl + 1024*1024, &tsk_control, NULL);
+    
+    // 主绘制循环
+    draw_both_sorts();
+    
+    // 清理
+    free(stack_A);
+    free(stack_B);
+    free(stack_ctrl);
+    
     task_exit(0);
 }
